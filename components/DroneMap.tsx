@@ -1,41 +1,128 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import ReactMap, { Marker, Popup, NavigationControl } from 'react-map-gl/mapbox'
+import ReactMap, { Marker, Popup, NavigationControl, Source, Layer } from 'react-map-gl/mapbox'
+import type { LayerProps } from 'react-map-gl/mapbox'
 import 'mapbox-gl/dist/mapbox-gl.css'
 import { supabase } from '@/lib/supabase'
 import type { DronePosition, TelemetryRecord } from '@/types/telemetry'
 
 type PositionMap = Record<string, DronePosition>
+type TrailMap = Record<string, [number, number][]>
+
+const TRAIL_LENGTH = 30
+
+const trailLineLayer: LayerProps = {
+  id: 'drone-trails',
+  type: 'line',
+  paint: {
+    'line-color': '#00d4ff',
+    'line-width': 1.5,
+    'line-opacity': 0.35,
+    'line-dasharray': [2, 2],
+  },
+}
+
+const trailGlowLayer: LayerProps = {
+  id: 'drone-trails-glow',
+  type: 'line',
+  paint: {
+    'line-color': '#00d4ff',
+    'line-width': 6,
+    'line-opacity': 0.06,
+  },
+}
+
+function buildTrailGeoJSON(trails: TrailMap): GeoJSON.FeatureCollection {
+  return {
+    type: 'FeatureCollection',
+    features: Object.entries(trails)
+      .filter(([, coords]) => coords.length >= 2)
+      .map(([droneId, coords]) => ({
+        type: 'Feature' as const,
+        properties: { drone_id: droneId },
+        geometry: { type: 'LineString' as const, coordinates: coords },
+      })),
+  }
+}
+
+function DroneSVGMarker({ pinging }: { pinging: boolean }) {
+  return (
+    <div className="relative cursor-pointer group select-none">
+      {/* Outer ping ring on new data */}
+      {pinging && (
+        <div className="absolute -inset-3 animate-ping rounded-full bg-[#00d4ff]/20 pointer-events-none" />
+      )}
+      {/* Hover halo */}
+      <div className="absolute -inset-3 rounded-full bg-[#00d4ff]/0 group-hover:bg-[#00d4ff]/10 transition-colors duration-300 pointer-events-none" />
+      {/* Drone icon */}
+      <svg
+        width="24"
+        height="24"
+        viewBox="0 0 24 24"
+        fill="none"
+        className="relative z-10 drop-shadow-[0_0_6px_rgba(0,212,255,0.9)]"
+      >
+        {/* Body */}
+        <circle cx="12" cy="12" r="3" fill="#00d4ff" opacity="0.95" />
+        {/* Radar ring */}
+        <circle cx="12" cy="12" r="5.5" stroke="#00d4ff" strokeWidth="0.6" opacity="0.4" strokeDasharray="2.5 2" />
+        {/* Arms */}
+        <line x1="12" y1="9" x2="6.5" y2="4" stroke="#00d4ff" strokeWidth="1.2" opacity="0.8" strokeLinecap="round" />
+        <line x1="12" y1="9" x2="17.5" y2="4" stroke="#00d4ff" strokeWidth="1.2" opacity="0.8" strokeLinecap="round" />
+        <line x1="12" y1="15" x2="6.5" y2="20" stroke="#00d4ff" strokeWidth="1.2" opacity="0.8" strokeLinecap="round" />
+        <line x1="12" y1="15" x2="17.5" y2="20" stroke="#00d4ff" strokeWidth="1.2" opacity="0.8" strokeLinecap="round" />
+        {/* Propellers */}
+        <circle cx="6.5" cy="4" r="2" fill="#00d4ff" opacity="0.85" />
+        <circle cx="17.5" cy="4" r="2" fill="#00d4ff" opacity="0.85" />
+        <circle cx="6.5" cy="20" r="2" fill="#00d4ff" opacity="0.85" />
+        <circle cx="17.5" cy="20" r="2" fill="#00d4ff" opacity="0.85" />
+      </svg>
+    </div>
+  )
+}
 
 export default function DroneMap() {
   const [positions, setPositions] = useState<PositionMap>({})
+  const [trails, setTrails] = useState<TrailMap>({})
   const [selected, setSelected] = useState<string | null>(null)
   const [pingIds, setPingIds] = useState<Set<string>>(new Set())
 
   useEffect(() => {
-    // Fetch latest position per drone on mount
     async function fetchLatest() {
       const { data } = await supabase
         .from('flight_telemetry')
         .select('drone_id, latitude, longitude, altitude, timestamp')
         .order('timestamp', { ascending: false })
-        .limit(200)
+        .limit(300)
 
       if (data) {
         const seen: PositionMap = {}
-        for (const row of data) {
-          if (!seen[row.drone_id]) {
-            seen[row.drone_id] = row as DronePosition
+        const trailAccum: TrailMap = {}
+
+        // Build trails oldest→newest
+        for (const row of [...data].reverse()) {
+          if (!trailAccum[row.drone_id]) trailAccum[row.drone_id] = []
+          trailAccum[row.drone_id].push([row.longitude, row.latitude])
+        }
+        // Trim to TRAIL_LENGTH
+        for (const id of Object.keys(trailAccum)) {
+          if (trailAccum[id].length > TRAIL_LENGTH) {
+            trailAccum[id] = trailAccum[id].slice(-TRAIL_LENGTH)
           }
         }
+        // Latest position per drone (data is desc so first = latest)
+        for (const row of data) {
+          if (!seen[row.drone_id]) seen[row.drone_id] = row as DronePosition
+        }
+
         setPositions(seen)
+        setTrails(trailAccum)
       }
     }
 
     fetchLatest()
 
-    // Subscribe to real-time inserts
     const channel = supabase
       .channel('realtime:flight_telemetry')
       .on(
@@ -53,12 +140,12 @@ export default function DroneMap() {
               timestamp: r.timestamp,
             },
           }))
-          // Trigger ping animation
-          setPingIds((prev) => {
-            const next = new Set(prev)
-            next.add(r.drone_id)
-            return next
+          setTrails((prev) => {
+            const existing = prev[r.drone_id] ?? []
+            const updated = [...existing, [r.longitude, r.latitude] as [number, number]]
+            return { ...prev, [r.drone_id]: updated.length > TRAIL_LENGTH ? updated.slice(-TRAIL_LENGTH) : updated }
           })
+          setPingIds((prev) => new Set(prev).add(r.drone_id))
           setTimeout(() => {
             setPingIds((prev) => {
               const next = new Set(prev)
@@ -70,13 +157,12 @@ export default function DroneMap() {
       )
       .subscribe()
 
-    return () => {
-      supabase.removeChannel(channel)
-    }
+    return () => { supabase.removeChannel(channel) }
   }, [])
 
   const droneList = Object.values(positions)
   const selectedDrone = selected ? positions[selected] : null
+  const trailGeoJSON = buildTrailGeoJSON(trails)
 
   return (
     <ReactMap
@@ -88,6 +174,13 @@ export default function DroneMap() {
     >
       <NavigationControl position="top-right" />
 
+      {/* Flight trails */}
+      <Source id="drone-trails-src" type="geojson" data={trailGeoJSON}>
+        <Layer {...trailGlowLayer} />
+        <Layer {...trailLineLayer} />
+      </Source>
+
+      {/* Drone markers */}
       {droneList.map((drone) => (
         <Marker
           key={drone.drone_id}
@@ -96,53 +189,43 @@ export default function DroneMap() {
           anchor="center"
           onClick={(e) => {
             e.originalEvent.stopPropagation()
-            setSelected(drone.drone_id)
+            setSelected(selected === drone.drone_id ? null : drone.drone_id)
           }}
         >
-          <div className="relative cursor-pointer group">
-            {/* Ping animation on new data */}
-            {pingIds.has(drone.drone_id) && (
-              <div className="absolute inset-0 h-5 w-5 -translate-x-0.5 -translate-y-0.5 animate-ping rounded-full bg-[#00d4ff]/60" />
-            )}
-            {/* Outer glow ring */}
-            <div className="absolute -inset-2 rounded-full bg-[#00d4ff]/10 opacity-0 group-hover:opacity-100 transition-opacity" />
-            {/* Core dot */}
-            <div className="relative h-4 w-4 rounded-full border-2 border-[#00d4ff] bg-[#00d4ff]/30 shadow-[0_0_10px_#00d4ff]" />
-          </div>
+          <DroneSVGMarker pinging={pingIds.has(drone.drone_id)} />
         </Marker>
       ))}
 
+      {/* Info popup */}
       {selectedDrone && (
         <Popup
           longitude={selectedDrone.longitude}
           latitude={selectedDrone.latitude}
           anchor="bottom"
-          offset={16}
+          offset={20}
           onClose={() => setSelected(null)}
           closeOnClick={false}
         >
-          <div className="p-3 font-mono text-xs min-w-[180px]">
-            <div className="mb-2 flex items-center gap-2">
+          <div className="p-3 font-mono text-xs min-w-[200px]">
+            <div className="mb-2.5 flex items-center gap-2">
               <div className="h-2 w-2 animate-pulse rounded-full bg-[#00d4ff]" />
-              <span className="font-bold text-[#00d4ff] tracking-wider">{selectedDrone.drone_id}</span>
+              <span className="font-bold tracking-widest text-[#00d4ff]">{selectedDrone.drone_id}</span>
             </div>
-            <div className="space-y-1 text-[#94a3b8]">
-              <div className="flex justify-between gap-4">
-                <span className="text-[#64748b]">LAT</span>
-                <span>{selectedDrone.latitude.toFixed(6)}</span>
-              </div>
-              <div className="flex justify-between gap-4">
-                <span className="text-[#64748b]">LON</span>
-                <span>{selectedDrone.longitude.toFixed(6)}</span>
-              </div>
-              <div className="flex justify-between gap-4">
-                <span className="text-[#64748b]">ALT</span>
-                <span className="text-[#00ff87]">{selectedDrone.altitude.toFixed(1)} m</span>
-              </div>
-              <div className="flex justify-between gap-4">
-                <span className="text-[#64748b]">PING</span>
-                <span>{new Date(selectedDrone.timestamp).toLocaleTimeString()}</span>
-              </div>
+            <div className="space-y-1.5 text-[#94a3b8]">
+              {[
+                { key: 'LAT', val: selectedDrone.latitude.toFixed(7), color: undefined },
+                { key: 'LON', val: selectedDrone.longitude.toFixed(7), color: undefined },
+                { key: 'ALT', val: `${selectedDrone.altitude.toFixed(1)} m`, color: '#00ff87' },
+                { key: 'TIME', val: new Date(selectedDrone.timestamp).toLocaleTimeString(), color: undefined },
+              ].map(({ key, val, color }) => (
+                <div key={key} className="flex justify-between gap-6">
+                  <span className="text-[#475569]">{key}</span>
+                  <span style={color ? { color } : undefined}>{val}</span>
+                </div>
+              ))}
+            </div>
+            <div className="mt-2.5 border-t border-[#1e2d42] pt-2 text-[#475569]">
+              Trail: {(trails[selectedDrone.drone_id] ?? []).length} points
             </div>
           </div>
         </Popup>

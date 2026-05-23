@@ -1,8 +1,12 @@
 'use client'
 
+import { useRef } from 'react'
 import Link from 'next/link'
-import { motion } from 'framer-motion'
+import { motion, useInView } from 'framer-motion'
 import NavBar from '@/components/NavBar'
+import ScrollProgress from '@/components/ScrollProgress'
+import LiveTicker from '@/components/LiveTicker'
+import { useCountUp } from '@/lib/useCountUp'
 
 const fadeUp = {
   hidden: { opacity: 0, y: 24 },
@@ -62,15 +66,44 @@ const FEATURES = [
 ]
 
 const STATS = [
-  { value: '< 50ms', label: 'Global API Latency' },
-  { value: '99.99%', label: 'Uptime SLA' },
-  { value: '1M+', label: 'Telemetry Pings / Day' },
-  { value: '256-bit', label: 'AES Encryption' },
+  { numeric: 50, prefix: '< ', suffix: 'ms', label: 'Global API Latency' },
+  { numeric: 9999, prefix: '', suffix: '%', label: 'Uptime SLA', divisor: 100 },
+  { numeric: 1, prefix: '', suffix: 'M+ / day', label: 'Telemetry Pings' },
+  { numeric: 256, prefix: '', suffix: '-bit', label: 'AES Encryption' },
 ]
+
+function StatCounter({
+  numeric, prefix, suffix, label, divisor, index,
+}: {
+  numeric: number; prefix: string; suffix: string; label: string; divisor?: number; index: number
+}) {
+  const ref = useRef<HTMLDivElement>(null)
+  const inView = useInView(ref, { once: true })
+  const count = useCountUp(numeric, 1400, inView)
+  const display = divisor ? (count / divisor).toFixed(2) : count
+
+  return (
+    <motion.div
+      ref={ref}
+      custom={index}
+      variants={fadeUp}
+      initial="hidden"
+      whileInView="show"
+      viewport={{ once: true }}
+      className="flex flex-col items-center gap-1 px-8 py-4 text-center"
+    >
+      <span className="font-mono text-3xl font-bold text-[#00d4ff] text-glow-accent tabular-nums">
+        {prefix}{display}{suffix}
+      </span>
+      <span className="font-mono text-xs tracking-wider text-[#64748b] uppercase">{label}</span>
+    </motion.div>
+  )
+}
 
 export default function LandingPage() {
   return (
     <div className="relative min-h-screen overflow-x-hidden">
+      <ScrollProgress />
       <NavBar />
 
       {/* ── HERO ──────────────────────────────────────────────── */}
@@ -148,6 +181,8 @@ export default function LandingPage() {
           <motion.div
             custom={5} variants={fadeUp} initial="hidden" animate="show"
             className="mx-auto mt-14 max-w-xl overflow-hidden rounded-xl border border-[#1e2d42] bg-[#0d1520]/80 text-left backdrop-blur"
+            whileHover={{ scale: 1.01 }}
+            transition={{ duration: 0.2 }}
           >
             <div className="flex items-center gap-2 border-b border-[#1e2d42] px-4 py-2.5">
               <div className="h-2.5 w-2.5 rounded-full bg-red-500/70" />
@@ -168,6 +203,14 @@ export default function LandingPage() {
               <span className="text-[#00ff87]">✓ 201 Created</span>{' — record inserted in 38ms'}
             </pre>
           </motion.div>
+
+          {/* Live ticker */}
+          <motion.div
+            custom={6} variants={fadeUp} initial="hidden" animate="show"
+            className="mx-auto mt-6 max-w-xl"
+          >
+            <LiveTicker />
+          </motion.div>
         </div>
 
         <motion.a
@@ -186,15 +229,8 @@ export default function LandingPage() {
       {/* ── STATS BAR ─────────────────────────────────────────── */}
       <section id="stats" className="border-y border-[#1e2d42] bg-[#0d1520]/60 py-10">
         <div className="mx-auto grid max-w-5xl grid-cols-2 gap-px md:grid-cols-4">
-          {STATS.map(({ value, label }, i) => (
-            <motion.div
-              key={label}
-              custom={i} variants={fadeUp} initial="hidden" whileInView="show" viewport={{ once: true }}
-              className="flex flex-col items-center gap-1 px-8 py-4 text-center"
-            >
-              <span className="font-mono text-3xl font-bold text-[#00d4ff] text-glow-accent">{value}</span>
-              <span className="font-mono text-xs tracking-wider text-[#64748b] uppercase">{label}</span>
-            </motion.div>
+          {STATS.map((stat, i) => (
+            <StatCounter key={stat.label} {...stat} index={i} />
           ))}
         </div>
       </section>

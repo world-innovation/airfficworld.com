@@ -1,10 +1,11 @@
 'use client'
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import dynamic from 'next/dynamic'
-import { motion } from 'framer-motion'
+import { motion, AnimatePresence } from 'framer-motion'
 import NavBar from '@/components/NavBar'
 import TelemetryFeed from '@/components/TelemetryFeed'
+import { supabase } from '@/lib/supabase'
 
 // Load map client-side only (mapbox-gl is not SSR compatible)
 const DroneMap = dynamic(() => import('@/components/DroneMap'), {
@@ -28,6 +29,39 @@ export default function DashboardPage() {
   const [showKey, setShowKey] = useState(false)
   const [copied, setCopied] = useState(false)
   const [activeTab, setActiveTab] = useState<'map' | 'feed'>('map')
+  const [pingCount, setPingCount] = useState<number | null>(null)
+  const [droneCount, setDroneCount] = useState<number | null>(null)
+
+  // Fetch real-time stats
+  useEffect(() => {
+    async function fetchStats() {
+      const [pings, drones] = await Promise.all([
+        supabase.from('flight_telemetry').select('*', { count: 'exact', head: true }),
+        supabase.from('flight_telemetry').select('drone_id', { count: 'exact', head: false }),
+      ])
+      if (pings.count !== null) setPingCount(pings.count)
+      if (drones.data) {
+        const unique = new Set(drones.data.map((r: { drone_id: string }) => r.drone_id))
+        setDroneCount(unique.size)
+      }
+    }
+
+    fetchStats()
+
+    const channel = supabase
+      .channel('dashboard_stats')
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'flight_telemetry' }, (payload) => {
+        setPingCount((n) => (n !== null ? n + 1 : 1))
+        setDroneCount((prev) => {
+          // We can't easily track unique without more state; just trigger a refetch
+          fetchStats()
+          return prev
+        })
+      })
+      .subscribe()
+
+    return () => { supabase.removeChannel(channel) }
+  }, [])
 
   async function handleRegister(e: React.FormEvent) {
     e.preventDefault()
@@ -161,18 +195,34 @@ export default function DashboardPage() {
 
           {/* Quick stats */}
           <div className="px-5 py-5">
-            <p className="mb-3 font-mono text-xs tracking-widest text-[#64748b] uppercase">Quick Stats</p>
+            <p className="mb-3 font-mono text-xs tracking-widest text-[#64748b] uppercase">Live Stats</p>
             <div className="grid grid-cols-2 gap-3">
               {[
-                { label: 'Drones', value: registered ? '1' : '0', color: '#00d4ff' },
-                { label: 'Pings Today', value: '—', color: '#00ff87' },
+                { label: 'Active Drones', value: droneCount !== null ? String(droneCount) : '…', color: '#00d4ff' },
+                { label: 'Total Pings', value: pingCount !== null ? pingCount.toLocaleString() : '…', color: '#00ff87' },
                 { label: 'Uptime', value: '99.9%', color: '#a78bfa' },
-                { label: 'Latency', value: '< 50ms', color: '#fb923c' },
+                { label: 'API Latency', value: '< 50ms', color: '#fb923c' },
               ].map(({ label, value, color }) => (
-                <div key={label} className="rounded-lg border border-[#1e2d42] bg-[#080c10]/60 p-3">
-                  <p className="font-mono text-lg font-bold" style={{ color }}>{value}</p>
+                <motion.div
+                  key={label}
+                  layout
+                  className="rounded-lg border border-[#1e2d42] bg-[#080c10]/60 p-3"
+                >
+                  <AnimatePresence mode="wait">
+                    <motion.p
+                      key={value}
+                      initial={{ opacity: 0, y: -4 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, y: 4 }}
+                      transition={{ duration: 0.2 }}
+                      className="font-mono text-lg font-bold tabular-nums"
+                      style={{ color }}
+                    >
+                      {value}
+                    </motion.p>
+                  </AnimatePresence>
                   <p className="font-mono text-xs text-[#64748b]">{label}</p>
-                </div>
+                </motion.div>
               ))}
             </div>
           </div>
